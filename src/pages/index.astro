@@ -1,0 +1,42 @@
+---
+import '../styles/global.css';
+---
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Simulador de Conducción 3D</title>
+</head>
+<body>
+  <div id="canvas-container"></div>
+  
+  <div id="ui-layer">
+    <div class="top-bar">
+      <div class="score-panel">
+        Puntos: <span id="score" class="score-value">100</span>
+      </div>
+      <div class="warning-container" id="warning-container">
+        <!-- Warnings will be injected here -->
+      </div>
+    </div>
+    
+    <div class="touch-controls">
+      <div class="d-pad">
+        <button class="control-btn" id="btn-up">W</button>
+        <div class="d-pad-row">
+          <button class="control-btn" id="btn-left">A</button>
+          <button class="control-btn" id="btn-down">S</button>
+          <button class="control-btn" id="btn-right">D</button>
+        </div>
+      </div>
+      <div class="action-pad">
+        <!-- Optional action buttons -->
+      </div>
+    </div>
+  </div>
+
+  <script src="../scripts/simulator.js"></script>
+</body>
+</html>
