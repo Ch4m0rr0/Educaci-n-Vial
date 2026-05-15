@@ -8,6 +8,7 @@ let keys = { w: false, a: false, s: false, d: false };
 // UI Elements
 const scoreElement = document.getElementById('score');
 const warningContainer = document.getElementById('warning-container');
+const speedValueElement = document.getElementById('speed-value');
 
 // Three.js setup
 const scene = new THREE.Scene();
@@ -125,6 +126,7 @@ loader.load('/Road Bits.glb', (gltf) => {
 // Game state variables
 const buildings = [];
 const trafficZones = [];
+const collidableBoxes = [];
 const carGroup = new THREE.Group();
 const blockSize = 40;
 const streetWidth = 20;
@@ -177,6 +179,11 @@ function buildCity() {
         
         scene.add(bModel);
         buildings.push(bModel);
+        
+        const worldBox = new THREE.Box3().setFromObject(bModel);
+        // Slightly reduce building box to allow close driving without snagging
+        worldBox.expandByScalar(-0.5);
+        collidableBoxes.push(worldBox);
       }
 
       const halfStep = (blockSize + streetWidth) / 2; // 30
@@ -212,10 +219,62 @@ function buildCity() {
         }
       }
 
-      // Add traffic sign and zone randomly
-      if (Math.random() < 0.3 && (Math.abs(i) >= 1 || Math.abs(j) >= 1)) {
+      // Add traffic sign and zone
+      const isJunction = (i < gridSize / 2 && j < gridSize / 2);
+      
+      // 1. Place Stop Signs or Traffic Lights at junctions
+      if (isJunction && Math.random() < 0.7) {
+        const type = 'stop';
+        const isTrafficLight = Math.random() < 0.5; // Randomly choose between stop sign and traffic light
+        const streetCx = cx + halfStep;
+        const streetCz = cz - qStep;
+        
+        const rBox = new THREE.Box3();
+        rBox.setFromCenterAndSize(
+          new THREE.Vector3(streetCx, 1, streetCz),
+          new THREE.Vector3(streetWidth, 2, blockSize)
+        );
+        
+        trafficZones.push({ box: rBox, type: type, limit: 15, active: true, cooldown: 0, wasInside: false, minSpeedInside: 999 });
+
+        const modelToUse = isTrafficLight ? models.trafficLight : models.stopSign;
+
+        if (modelToUse) {
+          const signModel = modelToUse.clone();
+          const sbox = new THREE.Box3().setFromObject(signModel);
+          const sSize = sbox.getSize(new THREE.Vector3());
+          const sScale = isTrafficLight ? (8 / sSize.y) : (4 / sSize.y);
+          signModel.scale.setScalar(sScale);
+
+          // Place exactly on the right corner before the intersection
+          // streetCx and streetCz are the centers of the road.
+          // Junction center is (cx + halfStep, cz + halfStep).
+          const junctionCenterZ = cz + halfStep;
+          
+          // Move to right sidewalk (-X in ThreeJS if +Z is forward) and just before the intersection (-Z)
+          const signX = streetCx - streetWidth / 2 - 1.5; 
+          const signZ = junctionCenterZ - streetWidth / 2 - 1.5;
+          
+          signModel.position.set(signX, -sbox.min.y * sScale, signZ);
+          
+          // Rotate so the arm extends over the street and faces the car
+          signModel.rotation.y = Math.PI; 
+          
+          scene.add(signModel);
+          
+          // Solo añadimos colisiones si NO es un semáforo
+          // porque el bounding box del semáforo incluye el espacio bajo su brazo y bloquea el paso
+          if (!isTrafficLight) {
+            const worldBox = new THREE.Box3().setFromObject(signModel);
+            collidableBoxes.push(worldBox);
+          }
+        }
+      }
+      
+      // 2. Place invisible Speed Cameras (Radar zones) along straight roads
+      if (Math.random() < 0.2 && (Math.abs(i) >= 1 || Math.abs(j) >= 1)) {
         const isHorizontal = Math.random() < 0.5;
-        const type = Math.random() < 0.5 ? 'stop' : 'speed';
+        const type = 'speed';
 
         const streetCx = isHorizontal ? cx : cx + halfStep;
         const streetCz = isHorizontal ? cz + halfStep : cz;
@@ -226,42 +285,42 @@ function buildCity() {
           new THREE.Vector3(isHorizontal ? blockSize : streetWidth, 2, isHorizontal ? streetWidth : blockSize)
         );
         
-        trafficZones.push({
-          box: rBox,
-          type: type,
-          limit: 15,
-          active: true,
-          cooldown: 0,
-          wasInside: false,
-          minSpeedInside: 999
-        });
-
-        const signBase = type === 'stop' ? models.stopSign : models.trafficLight;
-        const signModel = signBase.clone();
-
-        // Scale sign to ~4 units high
-        const sbox = new THREE.Box3().setFromObject(signModel);
-        const sSize = sbox.getSize(new THREE.Vector3());
-        const sScale = 4 / sSize.y;
-        signModel.scale.setScalar(sScale);
-
-        // Place on sidewalk
-        const signX = isHorizontal ? streetCx : streetCx - streetWidth / 2 + 1.5;
-        const signZ = isHorizontal ? streetCz - streetWidth / 2 + 1.5 : streetCz;
-        
-        signModel.position.set(signX, -sbox.min.y * sScale, signZ);
-        
-        if (isHorizontal) signModel.rotation.y = 0;
-        else signModel.rotation.y = Math.PI / 2;
-
-        scene.add(signModel);
+        trafficZones.push({ box: rBox, type: type, limit: 15, active: true, cooldown: 0, wasInside: false, minSpeedInside: 999 });
+        // Removed physical model from here so traffic lights only appear at corners.
       }
     }
   }
 }
 
+// Audio State
+let audioCtx = null;
+let engineOscillator = null;
+let engineGain = null;
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  engineOscillator = audioCtx.createOscillator();
+  engineGain = audioCtx.createGain();
+  
+  engineOscillator.type = 'sawtooth';
+  engineOscillator.frequency.value = 40;
+  
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = 400;
+
+  engineOscillator.connect(filter);
+  filter.connect(engineGain);
+  engineGain.connect(audioCtx.destination);
+  
+  engineGain.gain.value = 0.1;
+  engineOscillator.start();
+}
+
 // Input handling
 window.addEventListener('keydown', (e) => {
+  initAudio();
   const k = e.key.toLowerCase();
   if (keys.hasOwnProperty(k)) keys[k] = true;
   if (e.key === 'ArrowUp') keys.w = true;
@@ -282,9 +341,9 @@ window.addEventListener('keyup', (e) => {
 const bindBtn = (id, key) => {
   const btn = document.getElementById(id);
   if (!btn) return;
-  btn.addEventListener('touchstart', (e) => { e.preventDefault(); keys[key] = true; });
+  btn.addEventListener('touchstart', (e) => { e.preventDefault(); initAudio(); keys[key] = true; });
   btn.addEventListener('touchend', (e) => { e.preventDefault(); keys[key] = false; });
-  btn.addEventListener('mousedown', (e) => { keys[key] = true; });
+  btn.addEventListener('mousedown', (e) => { initAudio(); keys[key] = true; });
   btn.addEventListener('mouseup', (e) => { keys[key] = false; });
   btn.addEventListener('mouseleave', (e) => { keys[key] = false; });
 };
@@ -348,8 +407,35 @@ function animate() {
 
   const dirX = Math.sin(carState.heading);
   const dirZ = Math.cos(carState.heading);
-  carGroup.position.x += dirX * carState.speed * dt;
-  carGroup.position.z += dirZ * carState.speed * dt;
+  
+  const moveX = dirX * carState.speed * dt;
+  const moveZ = dirZ * carState.speed * dt;
+
+  carGroup.position.x += moveX;
+  carGroup.position.z += moveZ;
+  
+  carGroup.updateMatrixWorld();
+  let carBox = new THREE.Box3().setFromObject(carGroup);
+  
+  // Make car box slightly smaller for collisions to avoid snagging
+  const collisionBox = carBox.clone().expandByScalar(-0.2); 
+  
+  let collision = false;
+  for(let box of collidableBoxes) {
+      if(collisionBox.intersectsBox(box)) {
+          collision = true;
+          break;
+      }
+  }
+  
+  if (collision) {
+      // Revert position and stop
+      carGroup.position.x -= moveX;
+      carGroup.position.z -= moveZ;
+      carState.speed = 0;
+      carGroup.updateMatrixWorld();
+      carBox.setFromObject(carGroup);
+  }
 
   const camOffsetZ = 10;
   const camOffsetY = 4;
@@ -366,7 +452,16 @@ function animate() {
   currentLookAt.lerp(cameraTargetLook, 10 * dt);
   camera.lookAt(currentLookAt);
 
-  const carBox = new THREE.Box3().setFromObject(carGroup);
+  // Audio & UI Update
+  if (speedValueElement) {
+    const kmh = Math.abs(carState.speed * 3.6).toFixed(0);
+    speedValueElement.innerText = kmh;
+  }
+  if (engineOscillator && audioCtx) {
+    const targetFreq = 40 + Math.abs(carState.speed) * 3.5;
+    engineOscillator.frequency.setTargetAtTime(targetFreq, audioCtx.currentTime, 0.1);
+  }
+
   const currentSpeed = Math.abs(carState.speed);
 
   for (let zone of trafficZones) {
